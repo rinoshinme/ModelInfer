@@ -6,32 +6,38 @@
 #include "core/logger.h"
 
 
-namespace vortextrt
+namespace vortex
 {
     class Arcface
     {
     private:
         Logger m_Logger;
-        nvinfer1::IEngine* m_Engine;
+        nvinfer1::ICudaEngine* m_Engine;
         nvinfer1::IExecutionContext* m_Context;
+        nvinfer1::IRuntime* m_Runtime;
+
+        std::string m_InputBlobName;
+        std::string m_OutputBlobName;
+
         uint32_t m_InputWidth;
         uint32_t m_InputHeight;
         uint32_t m_InputChannels;
-
+        uint32_t m_OutputSize;
         std::vector<float> m_InputBuffer;
-        std::vector<float> m_OutputBuffer;
+        
         float* m_InputBufferDevice;
         float* m_OutputBufferDevice;
+
         cudaStream_t m_Stream;  // cuda stream for synchronization.
 
     public:
         Arcface(const std::string& model_path);
         ~Arcface();
 
-        void Infer(const cv::Mat& image);
+        void Infer(cv::Mat& image, std::vector<float>& output);
+        void Preprocess(cv::Mat& image);
 
     private:
         bool LoadFile(const std::string& file_path, std::vector<unsigned char>& data);
-
     };
 }

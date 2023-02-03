@@ -1,6 +1,6 @@
 /*
-normaly, onnx models can be converted to engine files with trtexec when all 
-ops are supported.
+    normaly, onnx models can be converted to engine files with trtexec when all 
+    ops are supported.
 */
 #pragma once
 #include <cstdint>

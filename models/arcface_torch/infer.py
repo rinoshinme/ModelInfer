@@ -53,8 +53,13 @@ class Demo(object):
 
 if __name__ == '__main__':
     demo = Demo('r50', 'weights/ms1mv3_arcface_r50_fp16/backbone.pth')
-    image_path = 'sample/sample1.jpg'
+    image_path = '../../sample/sample1.jpg'
     feat = demo.extract(image_path, normalize=False)
     print(feat[:10])
+    """
+    sample output: 
+        [-0.5209716  -0.11782981  0.0165088  -0.71297413  0.92646235  0.2421217
+         -0.35743704 -0.23166685  0.3014495   0.47779232]
+    """
     # onnx_path = './arcface_resnet50.onnx'
     # demo.to_onnx(onnx_path)

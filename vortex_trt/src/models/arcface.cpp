@@ -1,7 +1,9 @@
 #include "arcface.h"
 #include <fstream>
+#include <iostream>
 #include "core/cuda_utils.h"
-
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/highgui/highgui.hpp>
 
 namespace vortex
 {
@@ -9,66 +11,94 @@ namespace vortex
     {
         // load data from file
         std::vector<unsigned char> engine_data;
-        bool ret = LoadFile(model_path, engine_data);
-        assert(ret);
+        LoadFile(model_path, engine_data);
+        // assert(ret);
 
         // create engine
-        nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(m_Logger);
-        assert(runtime != nullptr);
-        m_Engine = runtime->deserializeCudaEngine(engine_data.data(), engine_data.size());
+        m_Runtime = nvinfer1::createInferRuntime(m_Logger);
+        assert(m_Runtime != nullptr);
+        m_Engine = m_Runtime->deserializeCudaEngine(engine_data.data(), engine_data.size());
         assert(m_Engine != nullptr);
         m_Context = m_Engine->createExecutionContext();
         assert(m_Context != nullptr);
 
-        // create cuda stream
-        checkRuntime(cudaStreamCreate(m_Stream));
+        m_InputBlobName = "input";
+        m_OutputBlobName = "output";
 
-        // allocate buffer
-        m_InputWidth = 112;
+        // allocate buffer for batchsize=1
+        // only support batchsize = 1 for now.
+        m_InputWidth = 112; 
         m_InputHeight = 112;
         m_InputChannels = 3;
         uint32_t input_numel = m_InputWidth * m_InputHeight * m_InputChannels;
-        uint32_t output_numel = 512;
+        m_OutputSize = 512;
         m_InputBuffer.resize(input_numel);
-        m_OutputBuffer.resize(output_numel);
         
-        checkRuntime(cudaMalloc(m_InputBufferDevice, input_numel * sizeof(float)));
-        checkRuntime(cudaMalloc(m_OutputBufferDevice, output_numel * sizeof(float)));
+        checkRuntime(cudaMalloc(&m_InputBufferDevice, input_numel * sizeof(float)));
+        checkRuntime(cudaMalloc(&m_OutputBufferDevice, m_OutputSize * sizeof(float)));
+
+        // create cuda stream
+        checkRuntime(cudaStreamCreate(&m_Stream));
     }
 
     Arcface::~Arcface()
     {
-        // destroy engine and execution context
+        // destroy engine, execution context and cuda stream
+        m_Context->destroy();
+        m_Engine->destroy();
+        m_Runtime->destroy();
+        cudaStreamDestroy(m_Stream);
+
+        // destroy buffers
+        checkRuntime(cudaFree(m_InputBufferDevice));
+        checkRuntime(cudaFree(m_OutputBufferDevice));
     }
 
-    void Arcface::Infer(const cv::Mat& image)
+    void Arcface::Preprocess(cv::Mat& image)
     {
         // preprocess
         cv::Mat temp;
-        cv::resize(image, temp, cv::Size(112, 112));
-        cv::cvtColor(temp, temp, cv::COLOR_BGR2RGB);
+        cv::resize(image, temp, cv::Size(m_InputWidth, m_InputWidth));
 
-        uint32_t stride = m_InputWidth * m_InputHeight;
-        float* pBlue = &m_InputBuffer[0];
-        float* pGreen = &m_InputBuffer[stride];
-        float* pRed = &m_InputBUffer[stride * 2];
+        uint32_t image_area = m_InputWidth * m_InputHeight;
+        uint32_t input_numel = image_area * m_InputChannels;
+
+        float* input_buffer = m_InputBuffer.data();
+
+        float* pBlue = input_buffer;
+        float* pGreen = input_buffer + image_area;
+        float* pRed = input_buffer + image_area * 2;
         unsigned char* pImage = temp.data;
-        for (int i = 0; i < stride * 3; i += 3)
+        for (uint32_t i = 0; i < image_area; ++i)
         {
-            pRed[i] = (pImage[i + 0] / 255.0 - 0.5) / 0.5;
-            pGreen[i] = (pImage[i + 1] / 255.0 - 0.5) / 0.5;
-            pBlue[i] = (pImage[i + 2] / 255.0 - 0.5) / 0.5;
+            pRed[i] = (pImage[3 * i + 0] / 255.0 - 0.5) / 0.5;
+            pGreen[i] = (pImage[3 * i + 1] / 255.0 - 0.5) / 0.5;
+            pBlue[i] = (pImage[3 * i + 2] / 255.0 - 0.5) / 0.5;
         }
+    }
+
+    void Arcface::Infer(cv::Mat& image, std::vector<float>& output)
+    {
+        std::cout << "Start inference\n";
+        // preprocess image data into input buffer
+        Preprocess(image);
 
         // infer
-        int input_batch = 1;
+        void* buffers[2] = { nullptr }; // for input/output buffer on gpu
+        const int inputIndex = m_Engine->getBindingIndex("input");
+        const int outputIndex = m_Engine->getBindingIndex("output");
+        
+        buffers[inputIndex] = m_InputBufferDevice;
+        buffers[outputIndex] = m_OutputBufferDevice;
+
         uint32_t input_numel = m_InputWidth * m_InputHeight * m_InputChannels;
-        uint32_t output_numel = 512;
+        checkRuntime(cudaMemcpyAsync(buffers[inputIndex], m_InputBuffer.data(), input_numel * sizeof(float), cudaMemcpyHostToDevice, m_Stream));
+        m_Context->enqueue(1, buffers, m_Stream, nullptr);
+        
+        output.resize(m_OutputSize);
 
-        checkRuntime(cudaMemcpyAsync(m_InputBufferDevice, m_InputBuffer.data(), input_numel * sizeof(float), cudaMemcpyHostToDevice, m_Stream));
-        auto input_dims = m_Engine->getBindingDimensions(0);
-        input_dims.d[0] = input_batch;
-
+        checkRuntime(cudaMemcpyAsync(output.data(), buffers[outputIndex], m_OutputSize * sizeof(float), cudaMemcpyDeviceToHost, m_Stream));
+        cudaStreamSynchronize(m_Stream);
     }
 
     bool Arcface::LoadFile(const std::string& file_path, std::vector<unsigned char>& data)
@@ -80,7 +110,8 @@ namespace vortex
             size_t file_size = file.tellg();
             file.seekg(0, file.beg);
             data.resize(file_size);
-            file.read(&data[0], file_size);
+            char* ptr = reinterpret_cast<char*>(data.data());
+            file.read(ptr, file_size);
             file.close();
             return true;
         }
